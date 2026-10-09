@@ -1,0 +1,11 @@
+# Regenerable local index.
+/graft/
+
+# Build and test artifacts. Keep the Windows binary in the repository.
+*.exe
+!/cleaner.exe
+/cleaner
+*.test
+*.out
+*.tmp
+.DS_Store
