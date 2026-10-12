@@ -17,7 +17,11 @@ func TestForEachReaderLine(t *testing.T) {
 	}{
 		{"", 0},
 		{"a", 1},
-		{"a\n", 2},
+		{"a\n", 1},
+		{"a\r", 1},
+		{"a\r\n", 1},
+		{"a\n\n", 2},
+		{"a\r\r", 2},
 		{"a\nb", 2},
 		{"a\r\nb", 2},
 		{"a\rb", 2},

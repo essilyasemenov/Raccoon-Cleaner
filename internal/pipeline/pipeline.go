@@ -19,6 +19,7 @@ const (
 	ReasonEarlyHex       = "early_hex"
 	ReasonEarlyShortener = "early_shortener"
 	ReasonOversizeLine   = "oversize_line"
+	ReasonWideTable      = "wide_table_row"
 	ReasonNoSeparator    = "no_separator"
 	ReasonBrokenUTF8     = "broken_utf8_or_qqq"
 	ReasonStars          = "stars"
@@ -98,6 +99,7 @@ type Stats struct {
 	Kept       int
 	Invalid    int
 	Duplicates int
+	WideRows   int
 	Reasons    map[string]int
 }
 
@@ -130,7 +132,18 @@ func (p *Processor) ProcessLine(line string) (string, bool) {
 	}
 	// ponytail: 2 KiB preserves normal URL-prefixed records; raise it if real inputs exceed that bound.
 	if len(line) > maxRawLineLen {
+		if wideDelimitedShape(line) {
+			p.Stats.WideRows++
+		}
 		p.Stats.drop(ReasonOversizeLine)
+		return "", false
+	}
+	_, columns, colonPair := WideDelimitedColumns(line)
+	if columns >= 3 {
+		p.Stats.WideRows++
+	}
+	if columns >= 4 && !colonPair {
+		p.Stats.drop(ReasonWideTable)
 		return "", false
 	}
 
@@ -348,6 +361,9 @@ func knownHashPair(line string) (login, pass string, ok bool) {
 
 func credentialPair(line string) (string, bool) {
 	line = strings.TrimSpace(line)
+	firstColon := strings.IndexByte(line, ':')
+	firstDelimiter := strings.IndexAny(line, ",\t|;")
+	var separated string
 	for _, delimiter := range []rune{',', '\t', '|', ';'} {
 		if !strings.ContainsRune(line, delimiter) {
 			continue
@@ -359,9 +375,25 @@ func credentialPair(line string) (string, bool) {
 		reader.LazyQuotes = true
 		if parts, err := reader.Read(); err == nil {
 			if pair, ok := separatedPair(parts, string(delimiter)); ok {
-				return pair, true
+				if len(parts) == 3 && (isURLField(parts[0]) || isURLField(parts[2])) {
+					login, pass, _ := strings.Cut(pair, ":")
+					if len(login) >= minFieldLen && len(pass) >= minFieldLen {
+						return pair, true
+					}
+				}
+				if separated == "" {
+					separated = pair
+				}
 			}
 		}
+	}
+	if firstColon >= 0 && firstDelimiter > firstColon {
+		if pair, ok := unquotedColonPair(line); ok {
+			return pair, true
+		}
+	}
+	if separated != "" {
+		return separated, true
 	}
 	if pair, ok := separatedPair(strings.Fields(line), " "); ok {
 		return pair, true
@@ -388,6 +420,82 @@ func credentialPair(line string) (string, bool) {
 		return "", false
 	}
 	return login + ":" + pass, true
+}
+
+func unquotedColonPair(line string) (string, bool) {
+	if strings.HasPrefix(strings.TrimSpace(line), `"`) {
+		return "", false
+	}
+	if delimiter := strings.IndexAny(line, ",\t|;"); delimiter >= 0 &&
+		strings.HasPrefix(strings.ToLower(line), "android:") && strings.Count(line[:delimiter], ":") <= 2 {
+		return "", false
+	}
+	login, pass, ok := lastPair(line)
+	if !ok || !validPair(login, pass) || strings.HasPrefix(pass, "//") {
+		return "", false
+	}
+	return login + ":" + pass, true
+}
+
+// WideDelimitedColumns reports a tabular record's separator, width, and whether a colon-form password may contain the separators.
+func WideDelimitedColumns(line string) (rune, int, bool) {
+	if _, _, ok := knownHashPair(strings.TrimSpace(line)); ok {
+		return 0, 0, false
+	}
+	firstColon := strings.IndexByte(line, ':')
+	var widest rune
+	width := 0
+	colonPair := false
+	for _, delimiter := range []rune{'\t', '|', ';', ','} {
+		firstDelimiter := strings.IndexRune(line, delimiter)
+		if firstDelimiter < 0 {
+			continue
+		}
+		reader := csv.NewReader(strings.NewReader(line))
+		reader.Comma = delimiter
+		reader.FieldsPerRecord = -1
+		reader.TrimLeadingSpace = true
+		reader.LazyQuotes = true
+		if fields, err := reader.Read(); err == nil {
+			if len(fields) <= 3 {
+				if _, ok := separatedPair(fields, string(delimiter)); ok {
+					return 0, 0, false
+				}
+			}
+			if len(fields) >= 3 && len(fields) > width {
+				widest = delimiter
+				width = len(fields)
+				_, ok := unquotedColonPair(line)
+				colonPair = firstColon >= 0 && firstColon < firstDelimiter && ok
+			}
+		}
+	}
+	return widest, width, colonPair
+}
+
+func wideDelimitedShape(line string) bool {
+	var counts [4]int
+	inQuotes := false
+	for i := 0; i < len(line); i++ {
+		if line[i] == '"' {
+			if inQuotes && i+1 < len(line) && line[i+1] == '"' {
+				i++
+				continue
+			}
+			inQuotes = !inQuotes
+			continue
+		}
+		if inQuotes {
+			continue
+		}
+		if index := strings.IndexByte("\t|;,", line[i]); index >= 0 {
+			counts[index]++
+			if counts[index] >= 2 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func separatedPair(parts []string, separator string) (string, bool) {

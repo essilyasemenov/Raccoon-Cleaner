@@ -64,24 +64,52 @@ func TestPipelineDelimitedPairsAreIdempotent(t *testing.T) {
 		{name: "quoted comma", input: `"user123","pass1234"`, want: `"user123","pass1234"`},
 		{name: "quoted comma in password", input: `"user123","pa,ss""word"`, want: `"user123","pa,ss""word"`},
 		{name: "quoted semicolon", input: `"user123";"pass1234"`, want: `"user123","pass1234"`},
+		{name: "quoted semicolon with commas in password", input: `"user123";"pa,ss,wo,rd"`, want: `"user123","pa,ss,wo,rd"`},
 		{name: "pipe", input: `user123|pass1234`, want: `"user123","pass1234"`},
 		{name: "tab", input: "user123\tpass1234", want: `"user123","pass1234"`},
 		{name: "bcrypt", input: `"user123","` + bcryptPassword + `"`, want: `"user123","` + bcryptPassword + `"`},
 		{name: "colon hash", input: "user123:" + colonHash, want: `"user123","5d41402abc4b2a76b9719d911017c592"`},
 		{name: "CSV colon hash", input: `"user123","` + colonHash + `"`, want: `"user123","5d41402abc4b2a76b9719d911017c592"`},
+		{name: "semicolons in colon password", input: "user123:pa;ss;wo;rd", want: `"user123","pa;ss;wo;rd"`},
+		{name: "commas in colon password", input: "user123:pa,ss,wo,rd", want: `"user123","pa,ss,wo,rd"`},
+		{name: "two commas in colon password", input: "user123:pa,ss,wo", want: `"user123","pa,ss,wo"`},
+		{name: "commas in URL-prefixed password", input: "https://example.com:user123:pa,ss,wo,rd", want: `"user123","pa,ss,wo,rd"`},
+		{name: "commas in URL with tab separator", input: "https://example.com/a,b,c,d\tuser123\tpass1234", want: `"user123","pass1234"`},
+		{name: "commas in pipe-separated password", input: "user123|pa,ss,wo,rd", want: `"user123","pa,ss,wo,rd"`},
+		{name: "Android source before CSV pair", input: "android:app,user123,pass1234", want: `"user123","pass1234"`},
+		{name: "Android source with nested colon before CSV pair", input: "android:package123:screen,user123,pass1234", want: `"user123","pass1234"`},
+		{name: "Android source with deeper colon path before CSV pair", input: "android:package123:screen:form,user123,pass1234", want: `"user123","pass1234"`},
+		{name: "Android colon prefix with commas in password", input: "android:app:user123:pa,ss,wo,rd", want: `"user123","pa,ss,wo,rd"`},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			first, ok := NewProcessor().ProcessLine(tc.input)
+			p := NewProcessor()
+			first, ok := p.ProcessLine(tc.input)
 			if !ok || first != tc.want {
-				t.Fatalf("first pass: got ok=%v out=%q want %q", ok, first, tc.want)
+				t.Fatalf("first pass: got ok=%v out=%q want %q reasons=%v", ok, first, tc.want, p.Stats.Reasons)
 			}
 			second, ok := NewProcessor().ProcessLine(first)
 			if !ok || second != first {
 				t.Fatalf("second pass: got ok=%v out=%q want unchanged %q", ok, second, first)
 			}
 		})
+	}
+}
+
+func TestPipelineRejectsWideDelimitedRows(t *testing.T) {
+	p := NewProcessor()
+	if out, ok := p.ProcessLine(`"StudentID","Name","Surname","user123:pass1234"`); ok {
+		t.Fatalf("wide table row was accepted: %q", out)
+	}
+	if out, ok := p.ProcessLine("http://example.com,metadata,user123,pass1234"); ok {
+		t.Fatalf("URL-first wide table row was accepted: %q", out)
+	}
+	if out, ok := p.ProcessLine("android:app,metadata,user123,pass1234"); ok {
+		t.Fatalf("Android-first wide table row was accepted: %q", out)
+	}
+	if got := p.Stats.Reasons[ReasonWideTable]; got != 3 {
+		t.Fatalf("wide table reason count=%d want 3", got)
 	}
 }
 
@@ -355,6 +383,19 @@ func TestPipelineDropsOversizeRawLineBeforeExtraction(t *testing.T) {
 	}
 	if got := p.Stats.Reasons[ReasonOversizeLine]; got != 1 {
 		t.Fatalf("oversize reason count=%d; all reasons=%v", got, p.Stats.Reasons)
+	}
+}
+
+func TestPipelineOversizeWideRowDoesNotAllocateBySize(t *testing.T) {
+	p := NewProcessor()
+	line := `"1","Alice","Smith","` + strings.Repeat("x", 1024*1024) + `"`
+	allocs := testing.AllocsPerRun(20, func() {
+		if out, ok := p.ProcessLine(line); ok {
+			t.Fatalf("oversize row was accepted: %q", out)
+		}
+	})
+	if allocs > 1 {
+		t.Fatalf("allocations=%v want at most 1", allocs)
 	}
 }
 

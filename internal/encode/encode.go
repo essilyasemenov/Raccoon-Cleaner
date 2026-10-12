@@ -78,12 +78,10 @@ func validUTF8File(path string) (bool, error) {
 // ForEachReaderLine reads LF, CRLF, or CR-delimited lines one at a time.
 func ForEachReaderLine(r io.Reader, fn func(line string) bool) error {
 	reader := bufio.NewReader(r)
-	trailingLF := false
 	for {
 		chunk, err := reader.ReadString('\n')
 		if len(chunk) > 0 {
-			trailingLF = strings.HasSuffix(chunk, "\n")
-			if trailingLF {
+			if strings.HasSuffix(chunk, "\n") {
 				chunk = strings.TrimSuffix(chunk, "\n")
 				chunk = strings.TrimSuffix(chunk, "\r")
 			}
@@ -93,9 +91,6 @@ func ForEachReaderLine(r io.Reader, fn func(line string) bool) error {
 		}
 		if err != nil {
 			if err == io.EOF {
-				if len(chunk) == 0 && trailingLF {
-					_ = fn("")
-				}
 				return nil
 			}
 			return err
@@ -113,5 +108,8 @@ func forEachCRLine(s string, fn func(line string) bool) bool {
 			return true
 		}
 		s = rest
+		if s == "" {
+			return true
+		}
 	}
 }

@@ -40,6 +40,12 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "fatal: ROOT %s does not exist or is not a directory\n", rootPath)
 		return 2
 	}
+	lock, err := acquireRunLock(rootPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "fatal: another cleaner may be running: %v\n", err)
+		return 2
+	}
+	defer lock.Close()
 
 	meta := metafile.New(metafilePath)
 	if err := meta.Load(); err != nil {
@@ -82,6 +88,7 @@ func run() int {
 		}
 		jobs = append(jobs, candidates...)
 	}
+	jobs = uniqueJobs(jobs)
 
 	if len(jobs) == 0 {
 		fmt.Println("Нет файлов для обработки.")
@@ -98,6 +105,24 @@ func run() int {
 		return 1
 	}
 	return 0
+}
+
+func uniqueJobs(jobs []discover.Job) []discover.Job {
+	seen := make(map[string]struct{}, len(jobs))
+	unique := make([]discover.Job, 0, len(jobs))
+	for _, job := range jobs {
+		resolved, err := filepath.EvalSymlinks(job.FilePath)
+		if err != nil {
+			unique = append(unique, job)
+			continue
+		}
+		if _, exists := seen[resolved]; exists {
+			continue
+		}
+		seen[resolved] = struct{}{}
+		unique = append(unique, job)
+	}
+	return unique
 }
 
 func promptLoop() (bool, error) {

@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"errors"
 	"fmt"
 	"runtime"
 	"sort"
@@ -18,8 +19,6 @@ const progressInterval = time.Second
 type Aggregate struct {
 	OK           int
 	Fail         int
-	Skipped      int
-	EmptyResult  int
 	KeptLines    int
 	RemovedLines int
 	DupLines     int
@@ -34,14 +33,7 @@ func (a *Aggregate) add(r result) {
 		a.Fail++
 		return
 	}
-	if r.Skipped {
-		a.Skipped++
-		return
-	}
 	a.OK++
-	if r.Kept == 0 {
-		a.EmptyResult++
-	}
 	a.KeptLines += r.Kept
 	a.RemovedLines += r.Removed
 	a.DupLines += r.Duplicates
@@ -152,7 +144,7 @@ func (p *progress) render() {
 }
 
 // Run executes candidate jobs with GOMAXPROCS workers.
-// When finished==plan[top], appends top to metafile even if some files erred (F6/F38).
+// A top folder is marked complete only when every file succeeds.
 func Run(jobs []discover.Job, deleteSource bool, meta *metafile.Store) *Aggregate {
 	agg := &Aggregate{Reasons: make(map[string]int)}
 	workers := runtime.GOMAXPROCS(0)
@@ -171,13 +163,17 @@ func Run(jobs []discover.Job, deleteSource bool, meta *metafile.Store) *Aggregat
 	prog.start()
 	defer prog.stopAndWait()
 
-	finished := make(map[string]*int32, len(plan))
+	type topState struct {
+		finished atomic.Int32
+		failed   atomic.Bool
+	}
+	states := make(map[string]*topState, len(plan))
 	for top := range plan {
-		var n int32
-		finished[top] = &n
+		states[top] = &topState{}
 	}
 
 	jobsCh := make(chan discover.Job)
+	outputPaths := &outputIndex{}
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -185,21 +181,19 @@ func Run(jobs []discover.Job, deleteSource bool, meta *metafile.Store) *Aggregat
 			defer wg.Done()
 			for j := range jobsCh {
 				prog.add(j.FilePath, j.FileName, j.Top)
-				r := processFile(j.FilePath, deleteSource)
+				r := processFileIndexed(j.FilePath, deleteSource, outputPaths)
 				prog.del(j.FilePath)
 
 				logMu.Lock()
 				prog.clearLocked()
 				switch {
+				case errors.Is(r.Err, errUnsupportedFormat):
+					fmt.Printf("[ОШИБКА ФОРМАТА] %s: %v\n", j.FileName, r.Err)
 				case r.Err != nil:
 					fmt.Printf("[ОШИБКА] %s: %v\n", j.FileName, r.Err)
-				case r.Skipped:
-					fmt.Printf("[ПРОПУСК] %s: нет подходящих записей\n", j.FileName)
 				default:
 					sourceDisposition := "сохранён"
-					if r.Kept == 0 {
-						sourceDisposition = "сохранён (0 строк — оригинал оставлен)"
-					} else if deleteSource {
+					if deleteSource {
 						sourceDisposition = "удалён"
 					}
 					fmt.Printf(
@@ -214,9 +208,11 @@ func Run(jobs []discover.Job, deleteSource bool, meta *metafile.Store) *Aggregat
 				logMu.Unlock()
 				agg.add(r)
 
-				ctr := finished[j.Top]
-				n := atomic.AddInt32(ctr, 1)
-				if int(n) == plan[j.Top] {
+				state := states[j.Top]
+				if r.Err != nil {
+					state.failed.Store(true)
+				}
+				if int(state.finished.Add(1)) == plan[j.Top] && !state.failed.Load() {
 					if err := meta.Append(j.Top); err != nil {
 						logMu.Lock()
 						prog.clearLocked()
@@ -241,9 +237,7 @@ func Run(jobs []discover.Job, deleteSource bool, meta *metafile.Store) *Aggregat
 func PrintSummary(agg *Aggregate, deleteMode bool) {
 	fmt.Println("Готово.")
 	fmt.Printf("Успешно обработано файлов: %d\n", agg.OK)
-	fmt.Printf("Пропущено неподходящих файлов: %d\n", agg.Skipped)
 	fmt.Printf("Ошибок: %d\n", agg.Fail)
-	fmt.Printf("Файлов с 0 строк (оригинал сохранён): %d\n", agg.EmptyResult)
 	fmt.Printf("Всего оставлено строк: %d\n", agg.KeptLines)
 	fmt.Printf("Всего удалено строк: %d\n", agg.RemovedLines)
 	fmt.Printf("Всего удалено дублей: %d\n", agg.DupLines)
@@ -263,7 +257,7 @@ func PrintSummary(agg *Aggregate, deleteMode bool) {
 	}
 	fmt.Println()
 	if deleteMode {
-		fmt.Println("Исходные TXT/CSV удалялись только после создания результата (кроме файлов с 0 строк).")
+		fmt.Println("Исходные TXT/CSV удалялись только при наличии непустого очищенного результата.")
 	} else {
 		fmt.Println("Режим save: исходные файлы не удалялись.")
 	}

@@ -16,6 +16,7 @@ func TestIsCandidate(t *testing.T) {
 		{"a.csv", true},
 		{"a_cleaned.txt", false},
 		{"a_cleaned_1.txt", false},
+		{"a_CLEANED.TXT", false},
 		{"readme.txt", false},
 		{"README.TXT", false},
 		{"a.log", false},

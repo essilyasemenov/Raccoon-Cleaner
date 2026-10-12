@@ -108,7 +108,7 @@ func isCandidate(name string) bool {
 		return false
 	}
 	stem := strings.TrimSuffix(name, filepath.Ext(name))
-	if strings.Contains(stem, "_cleaned") {
+	if strings.Contains(strings.ToLower(stem), "_cleaned") {
 		return false
 	}
 	return true
